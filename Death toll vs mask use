@@ -1,0 +1,174 @@
+---
+title: "Final Project (resubmitted) - Data 115"
+author: "Tram Lai"
+date: "July 8, 2021"
+geometry: "left=1in, right=1in, top=0.75in, bottom=0.75in"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r import data}
+# data to analyze
+counties.deaths <- read.csv("nyt-covid-deaths-by-us-counties.csv")
+mask.use <- read.csv("nyt-mask-use-by-county.csv")
+```
+
+```{r load libraries, include=FALSE}
+#libraries to use
+require(dplyr)
+require(ggplot2)
+require(tidyverse)
+require(tibble)
+require(tidyr)
+require(gridExtra)
+require("ggpubr")
+library(reshape)
+library(scales)
+```
+
+# Data Description & "Big Question" 
+I selected two sets of data from the New York Times' github repository: **COVID deaths by county** and **mask use by county** (between July 2 and July 14). I selected this data because I want to see if there is a relationship between the frequency/choice of mask use and COVID deaths due to lack of precautions ("Big Question").  
+\newline
+\newline
+Let's take a quick look at the counties.death dataset:  
+```{r look at counties.death dataset}
+head(counties.deaths)
+```
+The dataset is straightforward and easy to read, with the following columns: date, county, state, fips (code of the corresponding county), number of COVID cases as of corresponding date, and number of COVID deaths as of corresponding date. 
+\newline
+\newline
+Now let's look at the mask.use dataset:
+```{r look at mask.use dataset}
+head(mask.use)
+```
+The data was obtained by asking “How often do you wear a mask in public when you expect to be within six feet of another person?” between 7/2 and 7/14 of 2020. The columns **never, rarely, sometimes, frequently, always** correspond to the estimated share of people in that county with the previously-mentioned mask-wearing frequency.  
+\newline
+\newline
+Because the NYT data did not include county populations, I had to find that data separately to calculate the appropriate per capita numbers. I found the population data from the US Census website: https://www.census.gov/data/tables/time-series/demo/popest/2010s-counties-total.html
+
+```{r load population data}
+county.population <- read.csv("population2019.csv")
+head(county.population)
+```
+To avoid any miscalculation, let's convert the FIP from all 3 datasets to character.
+```{r convert int to character}
+counties.deaths$fips <- as.character(counties.deaths$fips)
+mask.use$COUNTYFP <- as.character(mask.use$COUNTYFP)
+county.population$FIP <- as.character(county.population$FIP)
+```
+
+
+# Data Processing Issues & Solutions  
+The *COVID deaths by county* dataset was too big to display properly on Excel, so I analyzed it on RStudio instead. We need to note that the **date** column from counties.death is stored as characters, and the **FIP** columns were originally stored as integers (if we were to only look at this dataset, then this column would be redundant as the county name is already in the 2nd column, but we need this column to work with the mask.use dataset.)
+\newline
+\newline
+Another problem is that there are missing values for FIP in the counties.death dataset, meaning there are lots of data points we could not use because we could not compare them to the appropriate corresponding county.
+\newline
+\newline
+Furthermore, the counties.death data extends to 1/1/2021, so we should only look at the data up to July 14, since that's the end of the mask use survey. 
+
+
+# Data Wrangling
+My prediction for the Big Question is that yes, there is a relationship between choice of mask use and COVID deaths; particularly, there will be a higher death toll percentage in counties where the majority of people are less likely to wear masks. 
+\newline
+Let's extract the counties.death data up to July 14, 2020 - specifically, rows where the *date* value is **7/14/2020.** 
+```{r extract 7/14/2020 portion of counties.death data}
+july14.deaths <- filter(counties.deaths, date=="7/14/2020")
+head(july14.deaths) # look at the first 6 rows to make sure we extracted data correctly
+```
+
+```{r another formula that would do the same thing, include=FALSE}
+# july14.deaths <- counties.deaths[counties.deaths$date=="7/14/2020" , ]
+```
+
+Now, let's use the **join** function to combine the mask.use dataset with this new july14.deaths dataset, with *FIP* as the qualifying condition. The columns of this new dataset should be: date, county, state, FIP, cases, deaths, NEVER, RARELY, SOMETIMES, FREQUENTLY, ALWAYS, and population.  
+```{r rename the FIP columns then combine datasets}
+# rename FIP columns
+names(july14.deaths)[names(july14.deaths) == 'fips'] <- 'FIP'
+names(mask.use)[names(mask.use) == 'COUNTYFP'] <- 'FIP'
+
+# keep only the FIP and population columns from the county.population data
+county.population <- select(county.population, FIP, POPESTIMATE2019)
+names(county.population)[names(county.population) == 'POPESTIMATE2019'] <- 'population'
+
+# combine datasets
+combined.data <- full_join(july14.deaths, mask.use, by="FIP")
+combined.data <- full_join(combined.data, county.population, by="FIP")
+head(combined.data)
+```
+To analyze the percentage of COVID deaths in each county, let's add a new column named **death.percentage** to combined.data where we divide the deaths number by the population number. 
+```{r add column & divide numbers}
+# calculate death percentage, round to 5 decimal places
+death.percentage <- 100*(combined.data$deaths/combined.data$population)
+death.percentage <- format(round(death.percentage, digits=5))
+# add above column to combined.data
+combined.data <- add_column(combined.data, death.percentage, .after="deaths")
+# rearrange the columns for easier reading
+combined.data <- combined.data[ , c("county", "state", "FIP", "cases", "deaths", 
+        "population", "death.percentage", "NEVER", "RARELY", "SOMETIMES", "FREQUENTLY", "ALWAYS")]
+head(combined.data)
+```
+Let's delete the NA values, since we can't use them for calculation.
+```{r delete NAs from combined.data}
+combined.data <- filter(combined.data, rowSums(is.na(combined.data))==0)
+# make death.percentage a numeric type
+combined.data$death.percentage <- as.numeric(combined.data$death.percentage)
+```
+
+With the death percentage calculated, we can plot it against mask use frequency (weighted).
+```{r plot death percentage vs mask use frequency}
+# id equivalent to x variables; measure equivalent to y variables
+combined.data <- melt(combined.data, id = c("death.percentage", "population", "FIP"), 
+                      measure = c("NEVER", "RARELY", "SOMETIMES", "FREQUENTLY", "ALWAYS"))
+
+# the "value" column is the frequency of the corresponding mask use
+ggplot(combined.data, aes(x=death.percentage, value, color=variable, size=value)) + 
+  geom_point(shape=21) + 
+  ggtitle("Mask use frequency vs. percentage of death in county population") +
+  labs(x="% of death in population", y="Mask use frequency", color="Mask use",
+  size="Frequency of mask use \n within 6 ft of another person") + 
+  scale_x_continuous(labels=percent) + scale_y_continuous(labels=percent)
+```
+
+```{r this command would also plot on the same page, include=FALSE}
+# ggarrange(never.wearmask, rarely.wearmask, sometimes.wearmask, frequently.wearmask, always.wearmask, ncol=2, nrow=3)
+```
+
+# Preliminary Analysis
+There is not an *immediately clear* conclusion from the plots, but we can see that the death percentage is smaller if the population is more likely to wear masks, and larger when the population is less likely to wear masks. Some of the counties have very small populations, so let's look at counties with populations larger than 50,000, then larger than 100,000. 
+```{r filter out counties population conditions, then plot again}
+# select only population > 50k
+combined.data <- filter(combined.data, population>50000)
+# plot data again
+ggplot(combined.data, aes(x=death.percentage, value, color=variable, size=value)) + 
+  geom_point(shape=21) + 
+  ggtitle("Mask use frequency vs. % of death in county population > 50,000") +
+  labs(x="% of death in population", y="Mask use frequency", color="Mask use",
+  size="Frequency of mask use \n within 6 ft of another person") + 
+  scale_x_continuous(labels=percent) + scale_y_continuous(labels=percent)
+
+# select only population > 100k
+combined.data <- filter(combined.data, population>100000)
+# plot data again
+ggplot(combined.data, aes(x=death.percentage, value, color=variable, size=value)) + 
+  geom_point(shape=21) + 
+  ggtitle("Mask use frequency vs. % of death in county population > 100,000") +
+  labs(x="% of death in population", y="Mask use frequency", color="Mask use",
+  size="Frequency of mask use \n within 6 ft of another person") + 
+  scale_x_continuous(labels=percent) + scale_y_continuous(labels=percent)
+```
+\newline
+The two scatterplots above look nearly identical.
+\newline
+\newline
+
+# Final Analysis
+After filtering out smaller populations, the results are inconclusive regarding our earlier claim that **there is a higher death toll percentage in counties where the majority of people are less likely to wear masks.** However, we can observe that the most prominent mask use frequency is **always** (on the y-axis), and most of the "dots" are concentrated around 0-10% death in population (on the x-axis) - therefore, we can claim that **higher mask use leads to less death.**
+\newline
+\newline 
+If given more background in R analytics and more data collection of mask use, I would have loved to apply the same analysis again to see if the plots would show a clearer trend. 
+
+
